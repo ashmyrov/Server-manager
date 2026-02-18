@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =========================
+# Load configuration
+# =========================
+
+CONFIG_FILE="$HOME/.server-manager.conf"
+
+# defaults
+SERVER_ROOT="$HOME/Server"
+SSH_DIR="$HOME/.ssh"
+GITCONFIG_MAIN="$HOME/.gitconfig"
+GITCONFIG_SERVER="$HOME/.gitconfig-server"
+
+# load user config if exists
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+fi
+
+# =========================
+# Helpers
+# =========================
+
+die() { echo "Error: $*" >&2; exit 1; }
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
+
+norm_ns() {
+  local ns
+  ns="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ "$ns" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "Invalid name '$1'"
+  echo "$ns"
+}
+
+find_namespace_dir() {
+  local want_lc="$1"
+  for d in "$SERVER_ROOT"/*/; do
+    [[ -d "$d" ]] || continue
+    if [[ "$(basename "$d" | tr '[:upper:]' '[:lower:]')" == "$want_lc" ]]; then
+      echo "${d%/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_main_git_include() {
+  touch "$GITCONFIG_MAIN"
+  if ! grep -Fq "path = $GITCONFIG_SERVER" "$GITCONFIG_MAIN"; then
+    printf '\n[include]\n    path = %s\n' "$GITCONFIG_SERVER" >> "$GITCONFIG_MAIN"
+    echo "Added include to $GITCONFIG_MAIN → $GITCONFIG_SERVER"
+  fi
+}
+
+ensure_ssh_key() {
+  local ns="$1"
+  local key="$SSH_DIR/$ns"
+  local pub="$SSH_DIR/$ns.pub"
+
+  mkdir -p "$SSH_DIR"
+  chmod 700 "$SSH_DIR"
+
+  if [[ -f "$key" && -f "$pub" ]]; then
+    return
+  fi
+
+  if [[ -f "$key" || -f "$pub" ]]; then
+    die "Partial SSH key exists for '$ns'"
+  fi
+
+  ssh-keygen -t ed25519 -a 64 -f "$key" -N "" -C "$USER@$(hostname)-$ns" >/dev/null
+  chmod 600 "$key"
+  chmod 644 "$pub"
+  echo "Generated SSH key: $key"
+}
+
+ensure_gitconfig_file() {
+  local ns="$1"
+  local cfg="$HOME/.gitconfig-$ns"
+  local key="$SSH_DIR/$ns"
+
+  if [[ ! -f "$cfg" ]]; then
+    cat > "$cfg" <<EOF
+[core]
+    sshCommand = ssh -i $key -o IdentitiesOnly=yes
+EOF
+    echo "Created $cfg"
+  fi
+}
+
+ensure_include_if() {
+  local dir="$1"
+  local ns="$2"
+  local cfg="$HOME/.gitconfig-$ns"
+  local block="[includeIf \"gitdir:$dir/\"]"
+
+  touch "$GITCONFIG_SERVER"
+
+  if grep -Fq "$block" "$GITCONFIG_SERVER"; then
+    return
+  fi
+
+  cat >> "$GITCONFIG_SERVER" <<EOF
+
+$block
+    path = $cfg
+EOF
+  echo "Added includeIf for $dir/"
+}
+
+remove_include_if() {
+  local dir="$1"
+  local gitdir="gitdir:$dir/"
+
+  [[ -f "$GITCONFIG_SERVER" ]] || return
+
+  cp -a "$GITCONFIG_SERVER" "$GITCONFIG_SERVER.bak"
+
+  awk -v gitdir="$gitdir" '
+    BEGIN {skip=0}
+    $0 ~ "\\[includeIf \"" gitdir "\"\\]" {skip=1; next}
+    skip && /^\[/ {skip=0}
+    skip {next}
+    {print}
+  ' "$GITCONFIG_SERVER.bak" > "$GITCONFIG_SERVER"
+}
+
+print_pub() {
+  local ns="$1"
+  local pub="$SSH_DIR/$ns.pub"
+  [[ -f "$pub" ]] && { echo; cat "$pub"; echo; }
+}
+
+# =========================
+# Commands
+# =========================
+
+cmd_config() {
+  cat <<EOF
+Config file:        $CONFIG_FILE
+SERVER_ROOT:        $SERVER_ROOT
+SSH_DIR:            $SSH_DIR
+GITCONFIG_MAIN:     $GITCONFIG_MAIN
+GITCONFIG_SERVER:   $GITCONFIG_SERVER
+EOF
+}
+
+cmd_new() {
+  local folder="$1"
+  local ns; ns="$(norm_ns "$folder")"
+
+  mkdir -p "$SERVER_ROOT"
+  ensure_main_git_include
+
+  if dir="$(find_namespace_dir "$ns")"; then
+    echo "Namespace exists: $dir"
+    cmd_ensure "$folder"
+    return
+  fi
+
+  local dir="$SERVER_ROOT/$folder"
+  mkdir -p "$dir"
+  echo "Created $dir"
+
+  ensure_ssh_key "$ns"
+  ensure_gitconfig_file "$ns"
+  ensure_include_if "$dir" "$ns"
+  print_pub "$ns"
+}
+
+cmd_ensure() {
+  local name="$1"
+  local ns; ns="$(norm_ns "$name")"
+
+  ensure_main_git_include
+  ensure_ssh_key "$ns"
+  ensure_gitconfig_file "$ns"
+
+  if dir="$(find_namespace_dir "$ns")"; then
+    ensure_include_if "$dir" "$ns"
+  fi
+
+  print_pub "$ns"
+}
+
+cmd_bootstrap() {
+  ensure_main_git_include
+  mkdir -p "$SERVER_ROOT"
+
+  for d in "$SERVER_ROOT"/*/; do
+    [[ -d "$d" ]] || continue
+    local folder ns
+    folder="$(basename "${d%/}")"
+    ns="$(norm_ns "$folder")"
+
+    ensure_ssh_key "$ns"
+    ensure_gitconfig_file "$ns"
+    ensure_include_if "${d%/}" "$ns"
+  done
+
+  echo "Bootstrap complete"
+}
+
+cmd_check() {
+  local name="$1"
+  local ns; ns="$(norm_ns "$name")"
+
+  echo "Namespace: $ns"
+
+  if dir="$(find_namespace_dir "$ns")"; then
+    echo "Folder: OK ($dir)"
+  else
+    echo "Folder: MISSING"
+  fi
+
+  [[ -f "$SSH_DIR/$ns" ]] && echo "SSH key: OK" || echo "SSH key: MISSING"
+  [[ -f "$HOME/.gitconfig-$ns" ]] && echo "Git config: OK" || echo "Git config: MISSING"
+  grep -Fq "gitdir:$dir/" "$GITCONFIG_SERVER" 2>/dev/null \
+    && echo "includeIf: OK" || echo "includeIf: MISSING"
+}
+
+cmd_rm() {
+  local name="$1"
+  local ns; ns="$(norm_ns "$name")"
+
+  if dir="$(find_namespace_dir "$ns")"; then
+    rm -rf "$dir"
+    remove_include_if "$dir"
+    echo "Removed folder $dir"
+  fi
+
+  rm -f "$SSH_DIR/$ns" "$SSH_DIR/$ns.pub" "$HOME/.gitconfig-$ns"
+  echo "Removed ssh key and git config for $ns"
+}
+
+# =========================
+# Entry point
+# =========================
+
+case "${1:-}" in
+  new)        cmd_new "${2:?name required}" ;;
+  ensure)     cmd_ensure "${2:?name required}" ;;
+  bootstrap)  cmd_bootstrap ;;
+  check)      cmd_check "${2:?name required}" ;;
+  rm)         cmd_rm "${2:?name required}" ;;
+  config)     cmd_config ;;
+  -h|--help|"")
+    echo "Usage: server {new|ensure|bootstrap|check|rm|config} <name>"
+    ;;
+  *)
+    die "Unknown command: $1"
+    ;;
+esac
