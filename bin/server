@@ -234,6 +234,90 @@ cmd_rm() {
   echo "Removed ssh key and git config for $ns"
 }
 
+show_help() {
+  cat <<'EOF'
+server-manager — workspace-based SSH identity manager for Git
+
+USAGE:
+  server <command> [arguments]
+
+COMMANDS:
+  new <FolderName>
+      Create a new workspace namespace.
+      - Creates folder: SERVER_ROOT/<FolderName>
+      - Generates SSH key: ~/.ssh/<namespace_lowercase>
+      - Creates git config: ~/.gitconfig-<namespace_lowercase>
+      - Adds includeIf rule so Git auto-selects the key by folder path
+      - Prints public SSH key to console
+
+  ensure <Name>
+      Ensure configuration for an existing namespace.
+      - Creates missing SSH key if absent
+      - Creates missing ~/.gitconfig-<namespace>
+      - Adds missing includeIf rule
+      - Does NOT recreate folders
+
+  bootstrap
+      Scan all folders under SERVER_ROOT and ensure:
+      - SSH keys exist
+      - Namespace git configs exist
+      - includeIf routing rules exist
+      Useful after reinstall or first setup.
+
+  check <Name>
+      Show status of a namespace:
+      - Folder existence
+      - SSH key presence
+      - Git config presence
+      - includeIf routing rule
+
+  rm <Name>
+      Remove a namespace completely.
+      - Deletes folder under SERVER_ROOT
+      - Deletes SSH key and public key
+      - Deletes ~/.gitconfig-<namespace>
+      - Removes includeIf rule from ~/.gitconfig-server
+
+  config
+      Show resolved configuration paths used by server-manager.
+
+OPTIONS:
+  -h, --help
+      Show this help message.
+
+CONCEPTS:
+  - One top-level folder = one Git identity
+  - Folder name is preserved as-is
+  - SSH key and git config use lowercase namespace
+  - Git routing is done via gitconfig includeIf + gitdir
+  - Git remotes stay standard (git@github.com:org/repo.git)
+
+FILES:
+  ~/.server-manager.conf
+      User configuration (paths).
+
+  ~/.gitconfig
+      Must include ~/.gitconfig-server once.
+
+  ~/.gitconfig-server
+      Managed file containing includeIf rules.
+
+  ~/.gitconfig-<namespace>
+      Per-namespace Git config with sshCommand.
+
+  ~/.ssh/<namespace>
+      SSH private key for namespace.
+
+EXAMPLES:
+  server new Dinner
+  server ensure Dinner
+  server bootstrap
+  server check Dinner
+  server rm Dinner
+  server config
+EOF
+}
+
 # =========================
 # Entry point
 # =========================
@@ -245,9 +329,7 @@ case "${1:-}" in
   check)      cmd_check "${2:?name required}" ;;
   rm)         cmd_rm "${2:?name required}" ;;
   config)     cmd_config ;;
-  -h|--help|"")
-    echo "Usage: server {new|ensure|bootstrap|check|rm|config} <name>"
-    ;;
+  -h|--help|"") show_help ;;
   *)
     die "Unknown command: $1"
     ;;
